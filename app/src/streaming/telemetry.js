@@ -61,6 +61,35 @@
   }
   return {sample:sample};
  }
+ // Records each episode where video publication stalls beyond a threshold,
+ // with the counter deltas across the stall, so a >50 Mbps incident can be
+ // characterized after the fact: decoded>0 with no publish is a waiting-for-IDR
+ // / non-displayable stall, high fecWallMs is a loss-recovery stall, and low
+ // rxBytes is receive starvation. See investigation/evidence/stall-instrumentation.md.
+ // Pure and cheap: observe() takes one counter and a wall time each frame; the
+ // capture thunk (heavier counter reads) runs only at stall boundaries.
+ function createStallTracker(thresholdMs,limit){
+  thresholdMs=thresholdMs>0?thresholdMs:100;limit=limit>0?limit:32;
+  var events=[],lastCount=null,lastAt=0,active=null;
+  function delta(a,b){var o={};for(var k in b)if(typeof b[k]==="number")o[k]=b[k]-(a&&typeof a[k]==="number"?a[k]:0);return o;}
+  function push(event){events.push(event);if(events.length>limit)events.shift();}
+  return {
+   observe:function(count,at,capture){
+    if(lastCount===null){lastCount=count;lastAt=at;return;}
+    if(count>lastCount){
+     if(active){active.durationMs=at-active.startAt;active.ended=true;active.delta=delta(active.startSnap,capture());delete active.startSnap;push(active);active=null;}
+     lastCount=count;lastAt=at;
+    }else if(!active&&at-lastAt>=thresholdMs){
+     active={startAt:lastAt,detectedAt:at,sinceLastPublishMs:at-lastAt,startSnap:capture()};
+    }
+   },
+   // Close an in-progress stall at teardown so a never-recovered stall is kept.
+   finalize:function(at,capture){if(active){active.durationMs=Math.max(0,at-active.startAt);active.ended=false;active.delta=delta(active.startSnap,capture());delete active.startSnap;push(active);active=null;}},
+   active:function(){return !!active;},
+   events:function(){return events.slice();},
+   summary:function(){var worst=0,total=0;for(var i=0;i<events.length;i++){worst=Math.max(worst,events[i].durationMs||0);total+=events[i].durationMs||0;}return {count:events.length,worstMs:worst,totalMs:total,ongoing:!!active};}
+  };
+ }
  // Ten minutes of one-second samples, kept only in RAM. A rare stall can be
  // inspected after play without TCP logging in the render/input loop.
  function createHistory(){
@@ -68,14 +97,14 @@
   function copy(value){return value?Object.assign({},value):null;}
   return {samples:samples,reset:function(){samples.length=0;},record:function(stats){
    var net=stats.network||{};
-   samples.push({time:Date.now(),mode:copy(stats.mode),telemetry:copy(stats.telemetry),clock:copy(stats.clock),fec:copy(stats.fec),input:copy(stats.input),rumble:copy(stats.rumble),packetPool:copy(stats.packetPool),referenceRecovery:!!stats.referenceRecovery,
+   samples.push({time:Date.now(),mode:copy(stats.mode),telemetry:copy(stats.telemetry),clock:copy(stats.clock),fec:copy(stats.fec),input:copy(stats.input),rumble:copy(stats.rumble),packetPool:copy(stats.packetPool),stallSummary:copy(stats.stallSummary),referenceRecovery:!!stats.referenceRecovery,
     network:{receivedBytes:net.receivedBytes||0,sentBytes:net.sentBytes||0,directVideoPackets:net.directVideoPackets||0,batchCopiedBytes:net.batchCopiedBytes||0,receiveWouldBlock:net.receiveWouldBlock||0},
     videoExpired:stats.videoExpired||0,videoBacklogDrops:stats.videoBacklogDrops||0,maxPumpMs:stats.maxPumpMs||0,maxDrainMs:stats.maxDrainMs||0,maxServiceMs:stats.maxServiceMs||0});
    if(samples.length>600)samples.shift();
   }};
  }
  function format(stats){
-  var t=stats.telemetry||{},m=stats.mode||{};function f(v,digits){return typeof v==="number"&&Number.isFinite(v)?v.toFixed(digits===undefined?1:digits):"—";}
+  var t=stats.telemetry||{},m=stats.mode||{},ss=stats.stallSummary||{};function f(v,digits){return typeof v==="number"&&Number.isFinite(v)?v.toFixed(digits===undefined?1:digits):"—";}
   return [m.width+" × "+m.height+" · "+m.fps+" FPS · "+f(m.bitrate/1000)+" Mbps requested",
    "Decoded "+f(t.decodedFps)+" · Texture "+f(t.textureFps)+" FPS",
    "Network RX "+f(t.receivedMbps,2)+" Mbps · RTT "+f(t.rttMs)+" ms",
@@ -91,8 +120,9 @@
    "Decoder "+f(t.decoderPending,0)+" frames · Audio ≤ "+f(t.audioBufferedMsUpperBound,0)+" ms",
    "Audio queue empty (observed) "+f(t.audioEmptyEpisodes,0)+" × / "+f(t.audioEmptyMs,0)+" ms",
    "Video gaps "+f(t.videoFrameGaps,0)+" · Stale skipped "+f(t.videoSuperseded,0)+" · Rejects "+f(t.decoderRejected,0),
+   "Stalls "+f(ss.count,0)+" · worst "+f(ss.worstMs,0)+" ms"+(ss.ongoing?" · ongoing":""),
    "Audio FEC "+f(t.audioRecovered,0)+" recovered / "+f(t.audioFecFailed,0)+" blocks failed · Skipped "+f(t.audioDiscardedMs,0)+" ms",
    "Texture timing excludes display scanout. − +: Exit"].join("\n");
  }
- global.MoonlightTelemetry={now:now,readCore:readCore,readFec:readFec,readPacketPool:readPacketPool,create:create,createHistory:createHistory,format:format};
+ global.MoonlightTelemetry={now:now,readCore:readCore,readFec:readFec,readPacketPool:readPacketPool,create:create,createHistory:createHistory,createStallTracker:createStallTracker,format:format};
 })(typeof window!=="undefined"?window:globalThis);

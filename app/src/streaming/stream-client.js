@@ -63,7 +63,7 @@
   },stop:function(){if(stopped)return;pending=false;stopped=true;if(output)send(0,0);}};
  }
  function create(options){
-  var signal={aborted:false},stopRequested=false,core,io,media,failure=null,done=null,startedAt=0,connectedAt=0,latestStats=null;
+  var signal={aborted:false},stopRequested=false,core,io,media,failure=null,done=null,startedAt=0,connectedAt=0,latestStats=null,stall=null;
   var cpu=options.renderer==="png"||options.renderer==="native-texture";
   var mode=options.mode||(cpu?{width:320,height:180,fps:15,bitrate:1000}:{width:1280,height:720,fps:60,bitrate:20000});
   // Higher-rate streams need another receive/Opus turn before the next frame.
@@ -96,7 +96,16 @@
    snapshot.input=Object.assign({},inputStats);
    snapshot.rumble=Object.assign({},rumble.stats);
    Object.assign(snapshot,{serviceIterations:serviceIterations,servicePumpMs:servicePumpMs,serviceDrainMs:serviceDrainMs,maxServiceMs:maxServiceMs});
+   snapshot.stallEvents=stall?stall.events():[];snapshot.stallSummary=stall?stall.summary():null;
    snapshot.telemetry=telemetry.sample(snapshot,active?global.MoonlightTelemetry.readCore(core):null);return snapshot;
+  }
+  // Heavier counter read used only at stall boundaries (start/resume/teardown).
+  function stallCapture(){
+   var c=media.frameCounters(),fec=null;
+   try{if(global.MoonlightTelemetry.readFec)fec=global.MoonlightTelemetry.readFec(core);}catch(error){}
+   return {decoded:c.decoded,presented:c.presented,superseded:c.superseded,expired:c.expired,backlog:c.backlog,
+    rxBytes:(io.stats&&io.stats.receivedBytes)||0,fecCalls:fec?fec.calls:0,fecWallMs:fec?fec.totalWallMs:0,
+    videoFrames:core._ml_session_video_frames?core._ml_session_video_frames():0};
   }
   function status(text){if(options.onStatus)options.onStatus(text);}
   function report(text){if(options.log)options.log(text);}
@@ -152,6 +161,10 @@
      if(result)throw Error("Cannot start core: "+result);
     }finally{session.key.fill(0);for(var p of pointers)core._free(p);}
     startedAt=Date.now();var lastStats=0;
+    // Record video-publication stalls (a frame taking far longer than the frame
+    // period to publish) with counter deltas, so a >50 Mbps incident can be
+    // characterized after play without live logging. Threshold scales with fps.
+    stall=global.MoonlightTelemetry.createStallTracker?global.MoonlightTelemetry.createStallTracker(Math.max(100,Math.round(6000/mode.fps))):null;
     while(!stopRequested){
      waitBudgetMs=0;await clock.wait(cpu?null:serviceBetweenFrames);if(stopRequested)break;
      // Queue video early and service the core while its GPU copy completes.
@@ -165,6 +178,7 @@
      var pumpElapsed=pumpedEarly-early+pumped-finishedEarly,drainElapsed=early-begin+finishedEarly-pumpedEarly+drained-pumped;
      pumpMs+=pumpElapsed;drainMs+=drainElapsed;maxPumpMs=Math.max(maxPumpMs,pumpElapsed);maxDrainMs=Math.max(maxDrainMs,drainElapsed);iterations++;
      rumble.flush();
+     if(stall&&connectedAt)stall.observe(media.publishedFrames(),Date.now(),stallCapture);
      if(failure)throw failure;
      if(core._ml_session_state()===3)throw Error("Core connection failed: "+core._ml_session_error());
      if(!connectedAt&&Date.now()-startedAt>25000)throw Error("Stream connection timed out");
@@ -187,7 +201,7 @@
       // Never free buffers still referenced by a suspended C task.
       failure=failure||Error("Core cleanup timed out; restart Civ VII before reusing streaming");report(failure.message);
       global.__moonlightStreamUnfinished={core:core,io:io,media:media};
-     }else{try{if(media){latestStats=collect(false);media.close();}if(core._ml_packet_pool_configure&&core._ml_packet_pool_configure(0)!==0)throw Error("Packet pool still owns live buffers");if(core._ml_fec_prepare_pair&&core._ml_fec_prepare_pair(-1)!==0)throw Error("Recovery tables still in use");if(latestStats&&global.MoonlightTelemetry.readPacketPool)latestStats.packetPool=global.MoonlightTelemetry.readPacketPool(core);if(io)io.close();}catch(error){failure=failure||error;report(error.message);global.__moonlightStreamUnfinished={core:core,io:io,media:media};}}
+     }else{try{if(media){if(stall)stall.finalize(Date.now(),stallCapture);latestStats=collect(false);media.close();}if(core._ml_packet_pool_configure&&core._ml_packet_pool_configure(0)!==0)throw Error("Packet pool still owns live buffers");if(core._ml_fec_prepare_pair&&core._ml_fec_prepare_pair(-1)!==0)throw Error("Recovery tables still in use");if(latestStats&&global.MoonlightTelemetry.readPacketPool)latestStats.packetPool=global.MoonlightTelemetry.readPacketPool(core);if(io)io.close();}catch(error){failure=failure||error;report(error.message);global.__moonlightStreamUnfinished={core:core,io:io,media:media};}}
     }else if(io)io.close();
     if(options.onStopped)options.onStopped(failure,latestStats);
    }

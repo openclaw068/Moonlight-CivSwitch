@@ -528,6 +528,12 @@ ready after the fresh-process validation. Native analysis sessions were closed.
 
 [Wreckfest stalls](wreckfest-stalls.md): saved gameplay diagnostics, input-load comparison, and recovery improvements at 40–70 Mbps.
 
+[Stall instrumentation](stall-instrumentation.md) (2026-11-12): records each
+video-publication stall as a discrete timestamped event with counter deltas, so a
+future >50 Mbps incident separates waiting-for-IDR, loss-recovery and receive
+starvation instead of being lost between one-second snapshots. Observability only;
+host-tested; exported by the existing diagnostics probe.
+
 Native resolution and 120 fps (2026-11-12): [native-resolution-120fps.md](native-resolution-120fps.md)
 analyses why the realistic ceiling is a stable 1080p60 (back-compat 60 Hz present,
 H.264-only decode, jitless single-threaded core) and maps the in-code 1080p/60

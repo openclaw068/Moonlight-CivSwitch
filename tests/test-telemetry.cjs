@@ -75,3 +75,44 @@ test('service timings and sampled audio starvation survive interval metrics and 
  assert.match(telemetry.format({mode:{},telemetry:h.samples[0].telemetry}),/Audio queue empty \(observed\) 2 × \/ 12 ms/);
  time=2000;assert.equal(meter.sample(s,null).servicePumpAvgMs,null);
 });
+
+test('stall tracker records a publication stall with boundary-only captures and counter deltas',()=>{
+ const tracker=telemetry.createStallTracker(100);
+ let captures=0;const snap=c=>()=>{captures++;return c;};
+ // Frames publishing on time: no stall, and capture is never invoked.
+ tracker.observe(1,0,snap({decoded:1,rxBytes:0,fecCalls:0,fecWallMs:0}));
+ tracker.observe(2,16,snap({decoded:2,rxBytes:0,fecCalls:0,fecWallMs:0}));
+ assert.equal(tracker.active(),false);assert.equal(captures,0);assert.equal(tracker.events().length,0);
+ // No new publication for 260 ms while decode advances and FEC burns time → a
+ // waiting/recovery stall. It is detected (one capture) and ends on resume.
+ tracker.observe(2,120,snap({decoded:5,rxBytes:1000,fecCalls:3,fecWallMs:200}));
+ assert.equal(tracker.active(),true);assert.equal(captures,1);
+ tracker.observe(3,276,snap({decoded:9,rxBytes:1800,fecCalls:4,fecWallMs:260}));
+ assert.equal(tracker.active(),false);assert.equal(captures,2);
+ const e=tracker.events();assert.equal(e.length,1);
+ assert.equal(e[0].startAt,16);assert.equal(e[0].durationMs,260);assert.equal(e[0].ended,true);
+ assert.equal(e[0].delta.decoded,4);assert.equal(e[0].delta.fecWallMs,60);assert.equal(e[0].delta.rxBytes,800);
+ assert.equal(e[0].startSnap,undefined);
+});
+test('stall tracker ignores sub-threshold gaps and finalizes a never-recovered stall',()=>{
+ const tracker=telemetry.createStallTracker(100);const cap=v=>()=>v;
+ tracker.observe(1,0,cap({}));tracker.observe(2,80,cap({}));// 80 ms < 100 ms threshold
+ assert.equal(tracker.events().length,0);assert.equal(tracker.active(),false);
+ tracker.observe(2,300,cap({presented:2}));// stall begins (never resumes)
+ assert.equal(tracker.active(),true);
+ tracker.finalize(900,cap({presented:2}));
+ const e=tracker.events();assert.equal(e.length,1);assert.equal(e[0].ended,false);assert.equal(e[0].durationMs,820);
+ const sum=tracker.summary();assert.equal(sum.count,1);assert.equal(sum.worstMs,820);assert.equal(sum.ongoing,false);
+});
+test('stall summary and overlay line report count and worst duration',()=>{
+ const tracker=telemetry.createStallTracker(100,2);const cap=()=>({});
+ // Three stalls with limit 2 → only the last two retained. Durations are
+ // resume-time minus last-publish-time: 350-0=350, 620-350=270, 910-620=290.
+ tracker.observe(1,0,cap);tracker.observe(1,200,cap);tracker.observe(2,350,cap);
+ tracker.observe(2,500,cap);tracker.observe(3,620,cap);
+ tracker.observe(3,760,cap);tracker.observe(4,910,cap);
+ const sum=tracker.summary();assert.equal(sum.count,2);assert.equal(sum.worstMs,290);
+ assert.match(telemetry.format({mode:{},stallSummary:{count:2,worstMs:350,ongoing:true}}),/Stalls 2 · worst 350 ms · ongoing/);
+ const h=telemetry.createHistory();h.record({stallSummary:{count:2,worstMs:150,totalMs:270,ongoing:false}});
+ assert.equal(h.samples[0].stallSummary.worstMs,150);
+});
