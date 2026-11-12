@@ -77,5 +77,24 @@ sequence command. Its pixel reference is derived from local FFmpeg decoding.
 Current native results match sampled luma and timestamps but fail the complete
 color comparison; consult the ledger before interpreting the output.
 
+## HEVC/AV1 decoder hunt
+
+`inspect-codec-survey.js` walks every loaded RX module and scans both its symbol
+names and its raw string-table blob for HEVC/H.265, AV1 and lower-level
+NVDEC/NVMEDIA/VIC/OMX decode markers, and lists small modules in full. It is
+read-only, creates no decoder, opens no service, and frees its scratch. It needs
+only `native-probe-helpers.js`:
+
+```sh
+python3 -B investigation/probes/send-probe.py <SWITCH_IP> \
+  investigation/probes/native-probe-helpers.js \
+  investigation/probes/inspect-codec-survey.js \
+  --output investigation/evidence/codec-survey-switch.txt
+```
+
+Interpret `MOONLIGHT_CODEC_SURVEY_STRINGS[...].leads` and `…_NAME_MATCHES` with
+the [codec survey ledger](../evidence/codec-survey.md): empty leads confirm the
+H.264/VP8/VP9-only finding; any lead is an HEVC/AV1 route to pursue.
+
 Read [the feasibility ledger](../evidence/streaming-feasibility.md) before drawing
 conclusions from an individual status, export name or timing.

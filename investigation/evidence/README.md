@@ -21,6 +21,9 @@ video/audio results and their remaining limitations.
 The [HEVC investigation](hevc.md) identifies all five installed movie decoder
 types and records on-console HEVC format rejection. The additional video types
 are VP8 and VP9, so the app retains H.264 without adding an unsupported setting.
+The [codec survey](codec-survey.md) widens that to AV1 and to every loaded module
+and NVDEC/NVMEDIA interface (captured-data finding: no HEVC/AV1 decoder anywhere),
+and adds `inspect-codec-survey.js` to confirm it on a console.
 
 The [1080p quality investigation](quality-1080p.md) records 1080p60/10 Mbps
 decoder/texture validation, larger LAN packets, render/pump experiments, and

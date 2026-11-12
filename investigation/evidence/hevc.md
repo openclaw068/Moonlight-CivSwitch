@@ -67,3 +67,9 @@ Supporting HEVC would require investigating a separate lower-level decoder
 interface, including codec configuration, service access, texture output, and
 resource ownership. Changing Moonlight negotiation or relabeling a movie enum
 does not supply that missing decoder.
+
+The follow-up [codec survey](codec-survey.md) widens this to AV1 and to every
+loaded module and NVDEC/NVMEDIA interface: no HEVC or AV1 decoder is present in
+any captured module, and the only route to the T239's hardware decoder (`nvdrv`)
+blocked when probed. It adds `inspect-codec-survey.js` to confirm this on a
+console.
