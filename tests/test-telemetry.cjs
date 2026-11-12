@@ -33,6 +33,20 @@ test('interval FPS, throughput, decoder time, jitter and protocol metrics use ac
  const v=meter.sample(s,p);assert.equal(v.gpuTransferMs,.5);assert.equal(v.nativePublishMs,.2);assert.equal(v.gpuPollMs,.05);assert.equal(v.gpuCompletionMs,8);assert.equal(v.presentAgeMs,18);assert.equal(v.decodedFps,60);assert.equal(v.loopHz,50);assert.equal(v.pumpAvgMs,6);assert.equal(v.drainAvgMs,.8);assert.equal(v.textureFps,50);assert.equal(v.receivedMbps,4);assert.equal(v.decodeReadyMs,5);assert.equal(v.copyPresentMs,.8);assert.equal(v.frameIntervalMs,20);assert.equal(v.frameJitterMs,10);assert.equal(v.frameReceiveMs,2);assert.equal(v.coreQueueMs,.2);assert.equal(v.hostProcessingMs,3);assert.equal(v.rttMs,4);assert.equal(v.videoFrameGaps,3);assert.equal(v.decoderRejected,1);assert.equal(v.decoderPending,2);assert.equal(v.audioBufferedMsUpperBound,40);
  time=3000;const empty=meter.sample(s,null);assert.equal(empty.decodeReadyMs,null);assert.equal(empty.rttMs,null);assert.equal(empty.frameJitterMs,null);assert.equal(empty.receivedMbps,0);
 });
+test('present cadence (rAF interval) is derived per second as the 60-Hz-vs-higher gate',()=>{
+ let time=0;const meter=telemetry.create(()=>time);
+ const s={network:{},clock:{frameIntervalCount:0,frameIntervalMs:0,frameIntervalSqMs:0,minFrameIntervalMs:0,maxFrameIntervalMs:0}};
+ assert.equal(meter.sample(s,null).presentHz,null);time=1000;
+ // One second later: 50 animation-frame wakes, each 20 ms apart (⇒ 50 Hz present),
+ // tightest ever 20 ms. A fresh clock object mirrors collect()'s per-sample copy.
+ s.clock={frameIntervalCount:50,frameIntervalMs:1000,frameIntervalSqMs:20000,minFrameIntervalMs:20,maxFrameIntervalMs:20};
+ const v=meter.sample(s,null);
+ assert.equal(v.presentIntervalMs,20);assert.equal(v.presentHz,50);assert.equal(v.presentJitterMs,0);
+ assert.equal(v.minPresentIntervalMs,20);assert.equal(v.maxPresentIntervalMs,20);
+ assert.match(telemetry.format({mode:{},telemetry:v}),/Present cadence 50.0 Hz \(20.0 ± 0.0 ms · min 20.0\)/);
+ // No new frames in the next second ⇒ no cadence reading rather than a stale one.
+ time=2000;assert.equal(meter.sample(s,null).presentHz,null);
+});
 test('core snapshots are bounded/versioned and overlay distinguishes unavailable metrics and texture timing',()=>{
  const heap=new Uint8Array(512),core={HEAPU8:heap,_ml_session_metrics:()=>0};assert.equal(telemetry.readCore(core),null);
  core._ml_session_metrics=()=>64;const data=new Float64Array(heap.buffer,64,22);data[0]=1;assert.equal(telemetry.readCore(core)[0],1);

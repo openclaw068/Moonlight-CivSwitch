@@ -42,6 +42,27 @@ test('GPU transfers retain their decoder slot until completion and publish only 
  ready=true;assert.equal(gpu.finish(),true);assert.equal(gpu.finish(),false);
  assert.deepEqual(presented,[2]);assert.deepEqual(released,[1,2]);gpu.close();
 });
+const buildAsyncGpu=scope.MoonlightStreamMedia.buildAsyncGpu;
+test('buildAsyncGpu returns all async objects when the fence/pipeline ABI matches',()=>{
+ const pacer={close(){}},fence={ready(){},close(){}},made={};
+ const r=buildAsyncGpu(()=>pacer,()=>fence,f=>{assert.equal(f,fence);return (made.pipeline={fence:f});});
+ assert.equal(r.error,undefined);assert.equal(r.videoPacer,pacer);assert.equal(r.gpuFence,fence);assert.equal(r.gpuPipeline,made.pipeline);
+});
+test('buildAsyncGpu falls back (returns {error}) when the GPU sync fence is rejected, closing the pacer',()=>{
+ let pacerClosed=0;const pacer={close(){pacerClosed++;}};
+ const r=buildAsyncGpu(()=>pacer,()=>{throw Error('GPU sync pointer range rejected');},()=>{throw Error('pipeline should not run');});
+ assert.match(r.error.message,/GPU sync pointer range rejected/);assert.equal(r.videoPacer,undefined);assert.equal(r.gpuFence,undefined);assert.equal(r.gpuPipeline,undefined);
+ assert.equal(pacerClosed,1);
+});
+test('buildAsyncGpu closes the fence when pipeline wiring (SetNvnSync) fails after the fence is built',()=>{
+ let fenceClosed=0,pacerClosed=0;const fence={ready(){},close(){fenceClosed++;}};
+ const r=buildAsyncGpu(()=>({close(){pacerClosed++;}}),()=>fence,()=>{throw Error('SetNvnSync failed');});
+ assert.match(r.error.message,/SetNvnSync failed/);assert.equal(fenceClosed,1);assert.equal(pacerClosed,1);
+});
+test('buildAsyncGpu tolerates a null pacer (non-60fps / smoothing disabled) on the fallback path',()=>{
+ const r=buildAsyncGpu(()=>null,()=>{throw Error('rejected');},()=>{throw Error('unused');});
+ assert.match(r.error.message,/rejected/);
+});
 test('GPU stop does not publish or release an unfinished copy',()=>{
  let ready=false;const released=[];
  const gpu=pipeline({submit(){},ready:()=>ready,present:()=>assert.fail('stop must not publish'),release:f=>released.push(f.index)});

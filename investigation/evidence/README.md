@@ -524,3 +524,14 @@ were refreshed. `gpu-overlap-loaded-ui-switch.txt` records the normal updated UI
 ready after the fresh-process validation. Native analysis sessions were closed.
 
 [Wreckfest stalls](wreckfest-stalls.md): saved gameplay diagnostics, input-load comparison, and recovery improvements at 40–70 Mbps.
+
+Native resolution and 120 fps (2026-11-12): [native-resolution-120fps.md](native-resolution-120fps.md)
+analyses why the realistic ceiling is a stable 1080p60 (back-compat 60 Hz present,
+H.264-only decode, jitless single-threaded core) and maps the in-code 1080p/60
+caps. Two off-device-verified changes support it: the
+[GPU-sync fallback](issue-5-gpu-sync.md) degrades to synchronous presentation
+instead of disconnecting when the async fence ABI does not match a unit (upstream
+issue #5), and [present-cadence instrumentation](present-cadence.md) measures the
+engine's real present rate (`presentHz` in the overlay) as the Phase-0 gate for
+the 120 fps question. Both are covered by host tests only; neither is confirmed on
+a console.

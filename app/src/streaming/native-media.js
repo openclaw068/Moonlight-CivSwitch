@@ -48,6 +48,28 @@
   for(var attempt=0;attempt<32&&pipeline.pending()&&clock()<deadline;attempt++)if(pipeline.finish())return true;
   return false;
  }
+ // Build the asynchronous GPU presentation objects (optional smoothing pacer,
+ // completion fence and transfer pipeline). On some Switch 2 units/firmwares the
+ // fence pointer chain or its ABI signature does not match this recorded build,
+ // so makeFence/makePipeline throw (see investigation/evidence/issue-5-gpu-sync.md).
+ // Rather than failing the whole stream, return {error} and let the caller fall
+ // back to synchronous GPU presentation. Any partially built object is released
+ // here so the fallback starts from a clean slate. makePacer may return null
+ // (non-60 fps or smoothing disabled); makeFence returns the fence; makePipeline
+ // receives that fence, wires it to the output buffer and returns the pipeline.
+ function buildAsyncGpu(makePacer,makeFence,makePipeline){
+  var pacer=null,fence=null;
+  try{
+   pacer=makePacer();
+   fence=makeFence();
+   var pipeline=makePipeline(fence);
+   return {videoPacer:pacer,gpuFence:fence,gpuPipeline:pipeline};
+  }catch(error){
+   if(pacer&&pacer.close){try{pacer.close();}catch(_){}}
+   if(fence&&fence.close){try{fence.close();}catch(_){}}
+   return {error:error};
+  }
+ }
  function createVideoPacer(clock,period){
   var queue=[],primed=false,firstAt=null,last=null,lastTimestamp=-Infinity;
   function releaseAll(){var first=null;while(queue.length){try{last.release(queue.shift());}catch(error){if(!first)first=error;}}if(first)throw first;}
@@ -79,7 +101,7 @@
   var pendingFrames=new Map(),decodeSamples=0,decodeMs=0,maxDecodeMs=0,lastPresentedAt=null,intervalCount=0,intervalMs=0,intervalSquaredMs=0,maxIntervalMs=0;
   var videoSuperseded=0,videoDeferredTicks=0,videoExpired=0,videoBacklogDrops=0,audioBatchSamples=960,audioPoolSize=2;
   var gpuTransfers=0,gpuTransferMs=0,nativePublishMs=0,gpuPolls=0,gpuPendingPolls=0,gpuPollMs=0,gpuTailChecks=0,gpuTailCompleted=0,gpuTailMs=0;
-  var movieBase=0n,gpuFence=null,gpuPipeline=null,gpuSubmissionAt=0,gpuCompletionSamples=0,gpuCompletionMs=0,gpuSubmitCost=0,videoPacer=null,presentAgeMs=0,presentAgeSamples=0;
+  var movieBase=0n,gpuFence=null,gpuPipeline=null,gpuSubmissionAt=0,gpuCompletionSamples=0,gpuCompletionMs=0,gpuSubmitCost=0,videoPacer=null,presentAgeMs=0,presentAgeSamples=0,gpuSyncFallback=null;
   function now(){return global.MoonlightTelemetry?global.MoonlightTelemetry.now():Date.now();}
   function presentedFrame(frame){var time=now();if(frame&&frame.submittedAt!==undefined){presentAgeMs+=time-frame.submittedAt;presentAgeSamples++;}if(lastPresentedAt!==null){var delta=time-lastPresentedAt;intervalCount++;intervalMs+=delta;intervalSquaredMs+=delta*delta;maxIntervalMs=Math.max(maxIntervalMs,delta);}lastPresentedAt=time;presented++;}
   function alloc(n){var p=malloc(n);if(!p)throw Error("Native media allocation failed");owned.push(p);return p;}
@@ -135,14 +157,29 @@
    if(global.MoonlightNativeTexture&&options.renderer!=="png")texture=global.MoonlightNativeTexture.create(io,core,w,h,{gpu:gpu});
    if(gpu){var target=texture.target();call("_ZN5movie6Buffer18SetDataAndCapacityEPvm",[output,target.texture,8]);call("_ZN5movie6Buffer9SetNvnDevEPv",[output,target.device]);}
    if(gpu&&!options.synchronousGpu){
-    if(fps===60&&options.smoothVideo!==false)videoPacer=createVideoPacer(now,1000/fps);
-    gpuFence=createGpuFence(target.device);call("_ZN5movie6Buffer10SetNvnSyncEPv",[output,gpuFence.pointer]);
-    gpuPipeline=createGpuPipeline({
-     submit:function(frame){var begin=now();ok("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE",[decoder,frame.index,output]);gpuSubmissionAt=now();gpuSubmitCost=gpuSubmissionAt-begin;gpuTransferMs+=gpuSubmitCost;conversionMs+=gpuSubmitCost;gpuTransfers++;},
-     ready:gpuFence.ready,
-     present:function(frame){var begin=now();gpuCompletionSamples++;gpuCompletionMs+=begin-gpuSubmissionAt;var url=texture.presentNative(),elapsed=now()-begin;nativePublishMs+=elapsed;conversionMs+=elapsed;maxConversionMs=Math.max(maxConversionMs,gpuSubmitCost+elapsed);if(options.onImage)options.onImage(url);lastPreview=begin;presentedFrame(frame);},
-     release:function(frame){ok("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi",[decoder,frame.index]);}
-    });
+    var built=buildAsyncGpu(
+     function(){return fps===60&&options.smoothVideo!==false?createVideoPacer(now,1000/fps):null;},
+     function(){return createGpuFence(target.device);},
+     function(fence){
+      call("_ZN5movie6Buffer10SetNvnSyncEPv",[output,fence.pointer]);
+      return createGpuPipeline({
+       submit:function(frame){var begin=now();ok("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE",[decoder,frame.index,output]);gpuSubmissionAt=now();gpuSubmitCost=gpuSubmissionAt-begin;gpuTransferMs+=gpuSubmitCost;conversionMs+=gpuSubmitCost;gpuTransfers++;},
+       ready:fence.ready,
+       present:function(frame){var begin=now();gpuCompletionSamples++;gpuCompletionMs+=begin-gpuSubmissionAt;var url=texture.presentNative(),elapsed=now()-begin;nativePublishMs+=elapsed;conversionMs+=elapsed;maxConversionMs=Math.max(maxConversionMs,gpuSubmitCost+elapsed);if(options.onImage)options.onImage(url);lastPreview=begin;presentedFrame(frame);},
+       release:function(frame){ok("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi",[decoder,frame.index]);}
+      });
+     }
+    );
+    if(built.error){
+     // Async GPU sync is unavailable on this console; degrade to the synchronous
+     // GPU path (every drained frame is copied and published inline) so the
+     // stream still runs instead of disconnecting. videoPacer/gpuFence/gpuPipeline
+     // stay null, which is exactly the synchronousGpu presentation path.
+     gpuSyncFallback=built.error&&built.error.message?built.error.message:String(built.error);
+     if(options.onStatus)options.onStatus("GPU sync unavailable ("+gpuSyncFallback+"); using synchronous video path");
+    }else{
+     videoPacer=built.videoPacer;gpuFence=built.gpuFence;gpuPipeline=built.gpuPipeline;
+    }
    }
    if(options.onStatus)options.onStatus("Video decoder ready: "+w+"×"+h+" at "+fps+" fps");return 0;
   }
@@ -295,7 +332,7 @@
    for(var p of owned.reverse())free(p);owned=[];started=false;configured=false;decoder=0n;audio=null;pendingFrames.clear();
   }
   return {videoSetup:videoSetup,videoFrame:videoFrame,audioSetup:audioSetup,audioFrame:audioFrame,drainVideo:drainVideo,finishVideo:function(deadline){var tail=Number.isFinite(deadline)&&gpuPipeline&&gpuPipeline.pending(),begin=tail?now():0,result=finishGpu(gpuPipeline,now,deadline);if(tail){gpuTailChecks++;if(result)gpuTailCompleted++;gpuTailMs+=now()-begin;}return result;},drainAudio:drainAudio,close:close,
-   stats:function(){return Object.assign({renderer:texture?(gpu?"native-gpu-texture":"native-texture"):"png",submitted:videoSubmitted,decoded:videoDecoded,presented:presented,videoSuperseded:videoSuperseded,videoDeferredTicks:videoDeferredTicks,videoExpired:videoExpired,videoBacklogDrops:videoBacklogDrops,gpuTransfers:gpuTransfers,gpuTransferMs:gpuTransferMs,nativePublishMs:nativePublishMs,gpuPolls:gpuPolls,gpuPendingPolls:gpuPendingPolls,gpuPollMs:gpuPollMs,gpuTailChecks:gpuTailChecks,gpuTailCompleted:gpuTailCompleted,gpuTailMs:gpuTailMs,gpuCompletionSamples:gpuCompletionSamples,gpuCompletionMs:gpuCompletionMs,videoPacerPending:videoPacer?videoPacer.pending():0,presentAgeMs:presentAgeMs,presentAgeSamples:presentAgeSamples,conversionMs:conversionMs,maxConversionMs:maxConversionMs,decodeSamples:decodeSamples,decodeMs:decodeMs,maxDecodeMs:maxDecodeMs,decoderPending:Math.max(0,videoSubmitted-videoDecoded),intervalCount:intervalCount,intervalMs:intervalMs,intervalSquaredMs:intervalSquaredMs,maxIntervalMs:maxIntervalMs,audioBufferedMsUpperBound:audio?(audio.stagedSamples+audio.pendingSamples+audio.buffers.reduce(function(sum,item){return sum+(item.inUse?item.samples:0);},0))/48:0,audioQueueLimitMs:audioBatchSamples*(audioPoolSize+1)/48,audioCatchups:audio?audio.catchups:0,audioDiscardedMs:audio?audio.discardedSamples/48:0,audioDecoded:audio?audio.decoded:0,audioQueued:audio?audio.queued:0,audioDropped:audio?audio.dropped:0,audioPrimed:!!(audio&&audio.started),audioPrefillMs:audioBatchSamples*audioPoolSize/48,audioEmptyEpisodes:audio?audio.emptyEpisodes:0,audioEmptyMs:audio?audio.emptyMs+(audio.emptySince===null?0:Math.max(0,now()-audio.emptySince)):0},texture?texture.stats():{});}};
+   stats:function(){return Object.assign({renderer:texture?(gpu?(gpuPipeline?"native-gpu-texture":"native-gpu-texture-sync"):"native-texture"):"png",gpuSyncFallback:gpuSyncFallback,submitted:videoSubmitted,decoded:videoDecoded,presented:presented,videoSuperseded:videoSuperseded,videoDeferredTicks:videoDeferredTicks,videoExpired:videoExpired,videoBacklogDrops:videoBacklogDrops,gpuTransfers:gpuTransfers,gpuTransferMs:gpuTransferMs,nativePublishMs:nativePublishMs,gpuPolls:gpuPolls,gpuPendingPolls:gpuPendingPolls,gpuPollMs:gpuPollMs,gpuTailChecks:gpuTailChecks,gpuTailCompleted:gpuTailCompleted,gpuTailMs:gpuTailMs,gpuCompletionSamples:gpuCompletionSamples,gpuCompletionMs:gpuCompletionMs,videoPacerPending:videoPacer?videoPacer.pending():0,presentAgeMs:presentAgeMs,presentAgeSamples:presentAgeSamples,conversionMs:conversionMs,maxConversionMs:maxConversionMs,decodeSamples:decodeSamples,decodeMs:decodeMs,maxDecodeMs:maxDecodeMs,decoderPending:Math.max(0,videoSubmitted-videoDecoded),intervalCount:intervalCount,intervalMs:intervalMs,intervalSquaredMs:intervalSquaredMs,maxIntervalMs:maxIntervalMs,audioBufferedMsUpperBound:audio?(audio.stagedSamples+audio.pendingSamples+audio.buffers.reduce(function(sum,item){return sum+(item.inUse?item.samples:0);},0))/48:0,audioQueueLimitMs:audioBatchSamples*(audioPoolSize+1)/48,audioCatchups:audio?audio.catchups:0,audioDiscardedMs:audio?audio.discardedSamples/48:0,audioDecoded:audio?audio.decoded:0,audioQueued:audio?audio.queued:0,audioDropped:audio?audio.dropped:0,audioPrimed:!!(audio&&audio.started),audioPrefillMs:audioBatchSamples*audioPoolSize/48,audioEmptyEpisodes:audio?audio.emptyEpisodes:0,audioEmptyMs:audio?audio.emptyMs+(audio.emptySince===null?0:Math.max(0,now()-audio.emptySince)):0},texture?texture.stats():{});}};
  }
- global.MoonlightStreamMedia={create:create,drainLatest:drainLatest,createGpuPipeline:createGpuPipeline,finishGpu:finishGpu,createVideoPacer:createVideoPacer};
+ global.MoonlightStreamMedia={create:create,drainLatest:drainLatest,createGpuPipeline:createGpuPipeline,finishGpu:finishGpu,createVideoPacer:createVideoPacer,buildAsyncGpu:buildAsyncGpu};
 })(window);

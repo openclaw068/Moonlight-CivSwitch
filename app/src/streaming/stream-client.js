@@ -2,7 +2,14 @@
 (function(global){
  "use strict";
  function createClock(){
-  var pending=null,stats={frameWakes:0,timerWakes:0,forcedWakes:0,serviceWakes:0,waitMs:0,maxWaitMs:0};
+  var pending=null,lastFrameAt=null;
+  // frameInterval* measures the gap between consecutive animation-frame (rAF)
+  // wakes — the engine's actual present cadence. Mean ≈ 16.67 ms means the host
+  // presents at 60 Hz; a sustained ≈ 8.33 ms would be the only evidence that any
+  // path above 60 fps exists under this Switch 1 back-compat title. This is the
+  // Phase-0 gate for the 120 fps question (investigation/evidence/present-cadence.md).
+  var stats={frameWakes:0,timerWakes:0,forcedWakes:0,serviceWakes:0,waitMs:0,maxWaitMs:0,
+   frameIntervalCount:0,frameIntervalMs:0,frameIntervalSqMs:0,maxFrameIntervalMs:0,minFrameIntervalMs:0};
   function now(){return global.performance&&global.performance.now?global.performance.now():Date.now();}
   function wait(service){
    if(pending)return pending.promise;
@@ -11,7 +18,9 @@
     if(pending!==entry)return;pending=null;
     if(entry.frame!==null)global.cancelAnimationFrame(entry.frame);if(entry.timer!==null)clearTimeout(entry.timer);
     if(entry.serviceTimer!==null)clearTimeout(entry.serviceTimer);
-    var elapsed=now()-entry.begin;stats.waitMs+=elapsed;stats.maxWaitMs=Math.max(stats.maxWaitMs,elapsed);stats[reason+"Wakes"]++;if(error)reject(error);else resolve();
+    var elapsed=now()-entry.begin;stats.waitMs+=elapsed;stats.maxWaitMs=Math.max(stats.maxWaitMs,elapsed);stats[reason+"Wakes"]++;
+    if(reason==="frame"){var at=now();if(lastFrameAt!==null){var gap=at-lastFrameAt;stats.frameIntervalCount++;stats.frameIntervalMs+=gap;stats.frameIntervalSqMs+=gap*gap;stats.maxFrameIntervalMs=Math.max(stats.maxFrameIntervalMs,gap);stats.minFrameIntervalMs=stats.minFrameIntervalMs===0?gap:Math.min(stats.minFrameIntervalMs,gap);}lastFrameAt=at;}
+    if(error)reject(error);else resolve();
    };
    var framed=typeof global.requestAnimationFrame==="function";
    // A hidden page may stop animation callbacks; keep startup/stop progressing.

@@ -28,6 +28,16 @@
    function mean(total,count){var n=delta(count);return n?delta(total)/n:null;}
    function coreMean(total,count){var n=protocol?protocol[count]-(old&&old.protocol?old.protocol[count]:0):0;return n>0?(protocol[total]-(old&&old.protocol?old.protocol[total]:0))/n:null;}
    var interval=mean("intervalMs","intervalCount"),interval2=mean("intervalSquaredMs","intervalCount"),net=s.network||{};
+   // Present cadence from the clock's animation-frame (rAF) wakes: the host
+   // engine's real present rate. presentHz ≈ 60 confirms a 60 Hz ceiling; only a
+   // sustained presentHz above 60 (minPresentIntervalMs ≈ 8.3) would indicate any
+   // path to >60 fps under this back-compat title. Phase-0 gate for 120 fps.
+   var oc=old&&old.stats.clock||{},cc=s.clock||{};
+   var presentCount=Math.max(0,(cc.frameIntervalCount||0)-(oc.frameIntervalCount||0));
+   var presentTotal=Math.max(0,(cc.frameIntervalMs||0)-(oc.frameIntervalMs||0));
+   var presentSq=Math.max(0,(cc.frameIntervalSqMs||0)-(oc.frameIntervalSqMs||0));
+   var presentMean=presentCount?presentTotal/presentCount:null;
+   var presentJitter=presentMean===null?null:Math.sqrt(Math.max(0,presentSq/presentCount-presentMean*presentMean));
    var rumble=s.rumble||{},oldRumble=old&&old.stats.rumble||{},rumbleUpdates=Math.max(0,(rumble.updates||0)-(oldRumble.updates||0));
    var value={decodedFps:seconds?delta("decoded")/seconds:null,textureFps:seconds?delta("presented")/seconds:null,
     receivedMbps:seconds?Math.max(0,(net.receivedBytes||0)-(old?old.stats.network.receivedBytes||0:0))*8/seconds/1000000:null,
@@ -38,6 +48,8 @@
     gpuCompletionMs:mean("gpuCompletionMs","gpuCompletionSamples"),gpuPollMs:mean("gpuPollMs","gpuPolls"),gpuPendingPolls:s.gpuPendingPolls||0,
     presentAgeMs:mean("presentAgeMs","presentAgeSamples"),videoPacerPending:s.videoPacerPending||0,
     frameIntervalMs:interval,frameJitterMs:interval===null?null:Math.sqrt(Math.max(0,interval2-interval*interval)),
+    presentIntervalMs:presentMean,presentJitterMs:presentJitter,presentHz:presentMean?1000/presentMean:null,
+    minPresentIntervalMs:cc.minFrameIntervalMs||null,maxPresentIntervalMs:cc.maxFrameIntervalMs||null,
     loopHz:seconds?delta("iterations")/seconds:null,pumpAvgMs:mean("pumpMs","iterations"),drainAvgMs:mean("drainMs","iterations"),
     serviceHz:seconds?delta("serviceIterations")/seconds:null,servicePumpAvgMs:mean("servicePumpMs","serviceIterations"),serviceDrainAvgMs:mean("serviceDrainMs","serviceIterations"),
     decoderPending:s.decoderPending||0,videoSuperseded:s.videoSuperseded||0,audioBufferedMsUpperBound:s.audioBufferedMsUpperBound||0,audioQueueLimitMs:s.audioQueueLimitMs||0,audioCatchups:s.audioCatchups||0,audioDiscardedMs:s.audioDiscardedMs||0,audioDropped:s.audioDropped||0,
@@ -72,6 +84,7 @@
    "Decode ready "+f(t.decodeReadyMs)+" ms · Copy/present "+f(t.copyPresentMs)+" ms",
    "GPU submit "+f(t.gpuTransferMs)+" ms · Decoder → texture "+f(t.presentAgeMs)+" ms",
    "Texture interval "+f(t.frameIntervalMs)+" ± "+f(t.frameJitterMs)+" ms",
+   "Present cadence "+f(t.presentHz)+" Hz ("+f(t.presentIntervalMs)+" ± "+f(t.presentJitterMs)+" ms · min "+f(t.minPresentIntervalMs)+")",
    "Loop "+f(t.loopHz)+" Hz · Pump "+f(t.pumpAvgMs)+" ms · Drain "+f(t.drainAvgMs)+" ms",
    "Between frames "+f(t.serviceHz)+" Hz · Pump "+f(t.servicePumpAvgMs)+" ms · Audio "+f(t.serviceDrainAvgMs)+" ms",
    "Rumble "+f(t.rumbleAvgMs)+" ms avg · "+f(t.rumbleMaxMs)+" ms max",
